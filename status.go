@@ -90,8 +90,8 @@ type Status struct {
 	XOffBattery time.Time
 	// The interval in hours between automatic self tests.
 	LastSelftest time.Time
-	// The results of the last self test, and may have the following values:
-	// • OK: self test indicates good battery
+	// Whether the last self test passed. The NIS reports one of:
+	// • OK: self test indicates good battery (true)
 	// • BT: self test failed due to insufficient battery capacity
 	// • NG: self test failed due to overload
 	// • NO: No results (i.e. no self test performed in the last 5 minutes)
@@ -122,14 +122,14 @@ type Status struct {
 // parseKV parses an input key/value string in "key : value" format, and sets
 // the appropriate struct field from the input data.
 func (s *Status) parseKV(kv string) error {
-	sp := strings.SplitN(kv, ":", 2)
-	if len(sp) != 2 {
+	rawK, rawV, ok := strings.Cut(kv, ":")
+	if !ok {
 		return errInvalidKeyValuePair
 	}
 
 	var (
-		k = key(strings.TrimSpace(sp[0]))
-		v = strings.TrimSpace(sp[1])
+		k = key(strings.TrimSpace(rawK))
+		v = strings.TrimSpace(rawV)
 	)
 
 	// Attempt to match various common data types.
@@ -157,16 +157,14 @@ func (s *Status) parseKV(kv string) error {
 	case keyNumXfers:
 		s.NumberTransfers, err = strconv.Atoi(v)
 	case keyNomPower:
-		f := strings.SplitN(v, " ", 2)
-		s.NominalPower, err = strconv.Atoi(f[0])
+		f, _, _ := strings.Cut(v, " ")
+		s.NominalPower, err = strconv.Atoi(f)
 	case keySelftest:
-		s.Selftest = v == "YES"
+		s.Selftest = v == "OK"
 	}
 
 	return err
 }
-
-// TODO(mdlayher): rework parsing code and add enumcheck.
 
 // A key is a field key for an apcupsd status line.
 type key string
@@ -262,11 +260,11 @@ func (s *Status) parseKVString(k key, v string) bool {
 // parseKVFloat parses a float64 value into the appropriate Status field. It
 // returns true if a field was matched, and false if not.
 func (s *Status) parseKVFloat(k key, v string) (bool, error) {
-	f := strings.SplitN(v, " ", 2)
+	f, _, _ := strings.Cut(v, " ")
 
 	// Save repetition for function calls.
 	parse := func() (float64, error) {
-		return strconv.ParseFloat(f[0], 64)
+		return strconv.ParseFloat(f, 64)
 	}
 
 	var err error
@@ -361,15 +359,10 @@ func (s *Status) parseKVDuration(k key, v string) (bool, error) {
 
 // parseDuration parses a duration value returned from a NIS as a time.Duration.
 func parseDuration(d string) (time.Duration, error) {
-	ss := strings.SplitN(d, " ", 2)
-	if len(ss) != 2 {
+	num, unit, ok := strings.Cut(d, " ")
+	if !ok {
 		return 0, errInvalidDuration
 	}
-
-	var (
-		num  = ss[0]
-		unit = ss[1]
-	)
 
 	// Normalize units into ones that time.ParseDuration expects.
 	switch strings.ToLower(unit) {
@@ -379,7 +372,7 @@ func parseDuration(d string) (time.Duration, error) {
 		unit = "s"
 	}
 
-	return time.ParseDuration(fmt.Sprintf("%s%s", num, unit))
+	return time.ParseDuration(num + unit)
 }
 
 // parseOptionalTime parses a time string but also accepts the special value

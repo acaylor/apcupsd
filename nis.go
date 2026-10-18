@@ -5,76 +5,58 @@ import (
 	"errors"
 	"io"
 	"math"
-	"sync"
 )
 
-var _ io.ReadWriteCloser = &nisReadWriteCloser{}
-
-// newNISReadWriteCloser wraps an io.ReadWriteCloser.
-func newNISReadWriteCloser(rwc io.ReadWriteCloser) *nisReadWriteCloser {
-	return &nisReadWriteCloser{
-		rwc:  rwc,
-		lenb: make([]byte, 2),
-	}
-}
-
-// An nisReadWriteCloser wraps an io.ReadWriteCloser with one that can encode
-// and decode messages using the NIS's protocol.
-type nisReadWriteCloser struct {
-	mu   sync.Mutex
-	rwc  io.ReadWriteCloser
-	lenb []byte
-}
-
-// Read reads messages from the NIS using its protocol:
-//  - 2 bytes: length of next message
+// The NIS protocol frames each message as:
+//  - 2 bytes: big endian length of data
 //  - N bytes: data
-func (rwc *nisReadWriteCloser) Read(b []byte) (int, error) {
-	rwc.mu.Lock()
-	defer rwc.mu.Unlock()
+//
+// A response is a sequence of frames terminated by a zero-length frame.
 
-	// Read two byte length of next data.
-	if _, err := io.ReadFull(rwc.rwc, rwc.lenb); err != nil {
-		return 0, err
-	}
-
-	// When no more data returned from server, return io.EOF.
-	length := binary.BigEndian.Uint16(rwc.lenb)
-	if length == 0 {
-		return 0, io.EOF
-	}
-
-	return io.ReadFull(rwc.rwc, b[:length])
-}
-
-// errBufferTooLarge indicates that nisReadWriteCloser.Write was passed a
-// buffer that is too large to send to the NIS.
+// errBufferTooLarge indicates that writeFrame was passed a buffer that is too
+// large to send to the NIS.
 var errBufferTooLarge = errors.New("apcupsd: buffer too large; must be size of uint16 or less")
 
-// Write writes messages to the NIS using its protocol by prepending each
-// message with its 2 byte length.
-func (rwc *nisReadWriteCloser) Write(b []byte) (int, error) {
-	// Cannot write more than math.MaxUint16 bytes.
-	if len(b) > math.MaxUint16 {
-		return 0, errBufferTooLarge
+// readFrame reads one frame from r into buf, growing buf if needed, and returns
+// the frame's data. An empty result is the end-of-response terminator.
+func readFrame(r io.Reader, buf []byte) ([]byte, error) {
+	var lenb [2]byte
+	if err := readFull(r, lenb[:]); err != nil {
+		return nil, err
 	}
 
-	rwc.mu.Lock()
-	defer rwc.mu.Unlock()
+	n := int(binary.BigEndian.Uint16(lenb[:]))
+	if n > cap(buf) {
+		buf = make([]byte, n)
+	}
+	buf = buf[:n]
 
-	// Two byte length of data
-	binary.BigEndian.PutUint16(rwc.lenb, uint16(len(b)))
+	if err := readFull(r, buf); err != nil {
+		return nil, err
+	}
 
-	// Send data and indicate the length of the body to caller
-	n, err := rwc.rwc.Write(append(rwc.lenb, b...))
-	n -= len(rwc.lenb)
-	return n, err
+	return buf, nil
 }
 
-// Close closes the underlying io.ReadWriteCloser.
-func (rwc *nisReadWriteCloser) Close() error {
-	rwc.mu.Lock()
-	defer rwc.mu.Unlock()
+// readFull is io.ReadFull, except that the transport ending before b is filled
+// is always io.ErrUnexpectedEOF: a response is only complete once the
+// zero-length terminator frame is read.
+func readFull(r io.Reader, b []byte) error {
+	_, err := io.ReadFull(r, b)
+	if err == io.EOF {
+		return io.ErrUnexpectedEOF
+	}
 
-	return rwc.rwc.Close()
+	return err
+}
+
+// writeFrame writes b to w as a single frame.
+func writeFrame(w io.Writer, b []byte) error {
+	if len(b) > math.MaxUint16 {
+		return errBufferTooLarge
+	}
+
+	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(b)), uint16(len(b)))
+	_, err := w.Write(append(frame, b...))
+	return err
 }

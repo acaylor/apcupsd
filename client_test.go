@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -94,6 +95,97 @@ func TestClientTimeout(t *testing.T) {
 	var nerr net.Error
 	if !errors.As(err, &nerr) || !nerr.Timeout() {
 		t.Fatalf("expected timeout error, but got: %v", err)
+	}
+}
+
+func TestClientLargeFrame(t *testing.T) {
+	host := strings.Repeat("x", maxString+1)
+	c := New(newTestConn(frames("HOSTNAME : "+host, "")))
+
+	s, err := c.Status()
+	if err != nil {
+		t.Fatalf("failed to retrieve status: %v", err)
+	}
+	if s.Hostname != host {
+		t.Fatalf("unexpected hostname length: %d", len(s.Hostname))
+	}
+}
+
+func TestClientUnexpectedEOF(t *testing.T) {
+	tests := []struct {
+		desc string
+		in   []byte
+	}{
+		{desc: "empty", in: nil},
+		{desc: "no terminator", in: frames("HOSTNAME : example")},
+		{desc: "length without data", in: []byte{0, 5}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			_, err := New(newTestConn(tt.in)).Status()
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected unexpected EOF, but got: %v", err)
+			}
+		})
+	}
+}
+
+func TestClientParseErrorConsumesResponse(t *testing.T) {
+	c := New(newTestConn(append(
+		frames("LINEV : bad", "HOSTNAME : old", ""),
+		frames("HOSTNAME : new", "")...,
+	)))
+
+	if _, err := c.Status(); err == nil {
+		t.Fatal("expected parse error, but got none")
+	}
+
+	s, err := c.Status()
+	if err != nil {
+		t.Fatalf("failed to retrieve status: %v", err)
+	}
+	if diff := cmp.Diff("new", s.Hostname); diff != "" {
+		t.Fatalf("unexpected hostname (-want +got):\n%s", diff)
+	}
+}
+
+func TestClientCloseUnblocksStatus(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	// Consume the request, then never respond.
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+
+	c := New(client)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.Status()
+		errc <- err
+	}()
+
+	// Give Status time to block on the response before closing.
+	time.Sleep(50 * time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("failed to close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on pending Status")
+	}
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("expected Status error after Close, but got none")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Status did not return after Close")
 	}
 }
 

@@ -6,10 +6,16 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 )
 
 // Client is a client for the apcupsd Network Information Server (NIS).
+//
+// Concurrent calls to Status are serialized. Close may be called at any time,
+// including from another goroutine to abort a Status call that is blocked
+// waiting on the NIS.
 type Client struct {
+	mu  sync.Mutex // serializes requests
 	rwc io.ReadWriteCloser
 }
 
@@ -41,9 +47,10 @@ func DialContext(ctx context.Context, network, addr string) (*Client, error) {
 
 // New wraps an existing io.ReadWriteCloser to create a Client for communication
 // with an NIS. Client's Close method will close the io.ReadWriteCloser when
-// called.
+// called. To allow Close to abort a blocked Status call, closing rwc must
+// unblock any pending Read or Write, as it does for a net.Conn.
 func New(rwc io.ReadWriteCloser) *Client {
-	return &Client{rwc: newNISReadWriteCloser(rwc)}
+	return &Client{rwc: rwc}
 }
 
 // Close closes the connection to an NIS.
@@ -56,31 +63,44 @@ const (
 )
 
 // Status retrieves the current UPS status from the NIS.
+//
+// Status has no timeout of its own; to bound a request, close the Client from
+// another goroutine, e.g. with time.AfterFunc.
 func (c *Client) Status() (*Status, error) {
-	_, err := c.rwc.Write([]byte("status"))
-	if err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := writeFrame(c.rwc, []byte("status")); err != nil {
 		return nil, err
 	}
 
-	b := make([]byte, maxString)
-	s := new(Status)
+	var (
+		b    = make([]byte, maxString)
+		s    = new(Status)
+		perr error
+	)
 
 	// NIS server sends text lines containing key/value pairs, so must keep
-	// iterating until EOF to parse them all.
+	// iterating until the zero-length terminator to parse them all.
 	for {
-		n, err := c.rwc.Read(b)
-		if err == io.EOF {
-			// Received key/value pair with length 0.
-			break
-		}
+		var err error
+		b, err = readFrame(c.rwc, b)
 		if err != nil {
 			return nil, err
 		}
-
-		// Parse key/value pair into appropriate struct field.
-		if err := s.parseKV(string(b[:n])); err != nil {
-			return nil, err
+		if len(b) == 0 {
+			break
 		}
+
+		// Keep reading after a parse error so the whole response is consumed
+		// and the connection can be reused; report the first error.
+		if err := s.parseKV(string(b)); err != nil && perr == nil {
+			perr = err
+		}
+	}
+
+	if perr != nil {
+		return nil, perr
 	}
 
 	return s, nil
