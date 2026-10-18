@@ -43,13 +43,11 @@ go test -race ./...
 go vet ./...
 ```
 
-The repository also runs [staticcheck](https://staticcheck.io/) and [enumcheck](https://pkg.go.dev/loov.dev/enumcheck) in CI; install and run them locally if you want to match CI:
+CI also runs [staticcheck](https://staticcheck.io/); install and run it locally if you want to match CI:
 
 ```bash
 go install honnef.co/go/tools/cmd/staticcheck@latest
-go install loov.dev/enumcheck@latest
 staticcheck ./...
-enumcheck ./...
 ```
 
 ---

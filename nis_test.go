@@ -1,107 +1,107 @@
 package apcupsd
 
 import (
-	"encoding/binary"
+	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 )
 
-func Test_nisReadWriteCloserRead(t *testing.T) {
-	in := []byte("HELLO : WORLD")
-	out := make([]byte, 16)
+func Test_readFrame(t *testing.T) {
+	r := bytes.NewReader(frames("HELLO : WORLD", ""))
 
-	rwc := testRWC(in, nil)
+	b, err := readFrame(r, nil)
+	if err != nil {
+		t.Fatalf("failed to read frame: %v", err)
+	}
+	if diff := cmp.Diff("HELLO : WORLD", string(b)); diff != "" {
+		t.Fatalf("unexpected frame (-want +got):\n%s", diff)
+	}
 
-	for {
-		// First write returns "key : value" data, second should
-		// return EOF
-		n, err := rwc.Read(out)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("failed to read: %v", err)
-		}
-
-		if diff := cmp.Diff(in, out[:n]); diff != "" {
-			t.Fatalf("unexpected byte output (-want +got):\n%s", diff)
-		}
+	b, err = readFrame(r, b)
+	if err != nil {
+		t.Fatalf("failed to read terminator: %v", err)
+	}
+	if len(b) != 0 {
+		t.Fatalf("expected empty terminator frame, but got: %q", b)
 	}
 }
 
-func Test_nisReadWriteCloserWriteBufferTooLarge(t *testing.T) {
-	rwc := testRWC(nil, nil)
-	_, err := rwc.Write(make([]byte, math.MaxUint16+1))
+func Test_readFrameLarge(t *testing.T) {
+	// Larger than the buffer passed in, which must grow rather than panic.
+	in := strings.Repeat("x", maxString+1)
+
+	b, err := readFrame(bytes.NewReader(frames(in)), make([]byte, maxString))
+	if err != nil {
+		t.Fatalf("failed to read frame: %v", err)
+	}
+	if diff := cmp.Diff(in, string(b)); diff != "" {
+		t.Fatalf("unexpected frame (-want +got):\n%s", diff)
+	}
+}
+
+func Test_readFrameUnexpectedEOF(t *testing.T) {
+	tests := []struct {
+		desc string
+		in   []byte
+	}{
+		{desc: "no length", in: nil},
+		{desc: "partial length", in: []byte{0}},
+		{desc: "no data", in: []byte{0, 5}},
+		{desc: "partial data", in: []byte{0, 5, 'a'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			_, err := readFrame(bytes.NewReader(tt.in), nil)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected unexpected EOF, but got: %v", err)
+			}
+		})
+	}
+}
+
+func Test_writeFrameBufferTooLarge(t *testing.T) {
+	err := writeFrame(io.Discard, make([]byte, math.MaxUint16+1))
 	if !errors.Is(err, errBufferTooLarge) {
 		t.Fatalf("expected buffer too large, but got: %v", err)
 	}
 }
 
-func Test_nisReadWriteCloserWrite(t *testing.T) {
-	in := []byte("HELLO : WORLD")
-	out := make([]byte, 16)
-
-	rwc := testRWC(nil, out)
-
-	n, err := rwc.Write(in)
-	if err != nil {
+func Test_writeFrame(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeFrame(&buf, []byte("status")); err != nil {
 		t.Fatalf("failed to write: %v", err)
 	}
 
-	// Write prepends length; two bytes.
-	n += 2
-	in = append([]byte{0, byte(len(in))}, in...)
-
-	if diff := cmp.Diff(in, out[:n]); diff != "" {
+	if diff := cmp.Diff(frames("status"), buf.Bytes()); diff != "" {
 		t.Fatalf("unexpected byte output (-want +got):\n%s", diff)
 	}
 }
 
-func testRWC(rb []byte, wb []byte) io.ReadWriteCloser {
-	return newNISReadWriteCloser(&testReadWriterCloser{
-		rb: rb,
-		wb: wb,
-	})
-}
-
-var _ io.ReadWriteCloser = &testReadWriterCloser{}
-
-type testReadWriterCloser struct {
-	ri int
-	rb []byte
-
-	wb []byte
-}
-
-func (rwc *testReadWriterCloser) Read(b []byte) (int, error) {
-	defer func() { rwc.ri++ }()
-
-	switch rwc.ri {
-	case 0:
-		// Send length of read buffer.
-		binary.BigEndian.PutUint16(b[0:2], uint16(len(rwc.rb)))
-		return 2, nil
-	case 1:
-		// Send the read buffer.
-		n := copy(b, rwc.rb)
-		return n, nil
-	case 2:
-		// Signal EOF to nisReadWriteCloser
-		binary.BigEndian.PutUint16(b[0:2], 0)
-		return 2, nil
-	default:
-		panic(fmt.Sprintf("too many calls to testReadWriteCloser.Read: %d", rwc.ri))
+// frames encodes each string as an NIS frame. An empty string encodes the
+// end-of-response terminator.
+func frames(ss ...string) []byte {
+	var b []byte
+	for _, s := range ss {
+		b = append(b, byte(len(s)>>8), byte(len(s)))
+		b = append(b, s...)
 	}
+
+	return b
 }
 
-func (rwc *testReadWriterCloser) Write(b []byte) (int, error) {
-	n := copy(rwc.wb, b)
-	return n, nil
+// testConn is an in-memory io.ReadWriteCloser that serves reads from a fixed
+// byte stream and discards writes.
+type testConn struct {
+	io.Reader
 }
 
-func (rwc *testReadWriterCloser) Close() error { return nil }
+func newTestConn(b []byte) *testConn { return &testConn{Reader: bytes.NewReader(b)} }
+
+func (*testConn) Write(b []byte) (int, error) { return len(b), nil }
+func (*testConn) Close() error                { return nil }

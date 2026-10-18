@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Status` no longer panics when the NIS sends a frame larger than 256 bytes.
+- `Status` returns `io.ErrUnexpectedEOF` when the connection ends before the end-of-response terminator, instead of returning partial data without an error.
+- A parse error no longer leaves the rest of the response unread, which made the next `Status` call return stale data.
+- `Close` no longer blocks behind a pending `Status` call, so it can be used to abort a stalled request.
+- `Status.Selftest` is now `true` for the `OK` result the NIS actually reports; previously it only matched `YES`, which the NIS never sends.
+
+### Changed
+
+- Concurrent `Status` calls on one `Client` are now serialized.
+- Simplified NIS framing and status parsing.
+- Removed the stale enumcheck references from the README and static analysis workflow.
+
 ## [0.1.0] - 2026-02-28
 
 ### Added

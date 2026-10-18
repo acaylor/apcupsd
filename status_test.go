@@ -81,10 +81,15 @@ func TestStatus_parseKV(t *testing.T) {
 		},
 		{
 			desc: "OK Selftest",
-			kv:   "SELFTEST: YES",
+			kv:   "SELFTEST: OK",
 			s: &Status{
 				Selftest: true,
 			},
+		},
+		{
+			desc: "failed Selftest",
+			kv:   "SELFTEST: BT",
+			s:    &Status{},
 		},
 		{
 			desc: "No alarm ALARMDEL",
