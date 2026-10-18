@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
 ### Fixed
 
 - `Status` no longer panics when the NIS sends a frame larger than 256 bytes.
@@ -38,5 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions: `actions/setup-go@v2` → `@v5`, `actions/checkout@v2` → `@v4`.
 - Static analysis workflow: enumcheck step disabled (dependency incompatible with Go 1.26); staticcheck and go vet retained.
 
-[Unreleased]: https://github.com/acaylor/apcupsd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/acaylor/apcupsd/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/acaylor/apcupsd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/acaylor/apcupsd/releases/tag/v0.1.0
